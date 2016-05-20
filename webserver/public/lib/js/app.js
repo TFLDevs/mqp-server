@@ -1839,47 +1839,55 @@
 			if(!MP.session.allowemojis) return;
 
 			//Basic
-			$.getJSON("https://raw.githubusercontent.com/Ranks/emojione/master/emoji.json", function(data) {
-				for(var e in data){
-					//MP.emotes[e] = MP.emotes[e] || "https://raw.githubusercontent.com/Ranks/emojify.js/master/dist/images/basic/" + e + ".png";
-					MP.emotes["Basic"][e] = MP.emotes["Basic"][e] || { url: "https://raw.githubusercontent.com/Ranks/emojione/master/assets/png/" + data[e].unicode + ".png" };
+			$.getJSON("https://raw.githubusercontent.com/iamcal/emoji-data/master/emoji.json", function(data) {
+				for(var e = 0; e < data.length; e++) {
+					if (!data[e].has_img_google) continue;
 
-					//Regular aliases
-					if(data[e].aliases)
-						for(var ee in data[e].aliases){
-							ee = data[e].aliases[ee].slice(1, -1);
-							//MP.emotes[ee] = MP.emotes[ee] || "https://raw.githubusercontent.com/Ranks/emojify.js/master/dist/images/basic/" + e + ".png";
-							MP.emotes["Basic"][ee] = MP.emotes["Basic"][ee] || { url: "https://raw.githubusercontent.com/Ranks/emojione/master/assets/png/" + data[e].unicode + ".png", style: 'max-width: 24px; max-height: 24px;', };
-						}
+					if (data[e].short_name) {
+						MP.emotes["Basic"][data[e].short_name] = MP.emotes["Basic"][data[e].short_name] || { url: "https://raw.githubusercontent.com/iamcal/emoji-data/master/img-google-64/" + data[e].image };
+					}
+					if (data[e].text) {
+						MP.emotes_ascii[data[e].text] = MP.emotes_ascii[data[e].text] || data[e].short_name;
+					}
 
 					//ASCII aliases
-					if(data[e].aliases_ascii)
-						for(var ee in data[e].aliases_ascii)
-							MP.emotes_ascii[data[e].aliases_ascii[ee]] = MP.emotes_ascii[data[e].aliases_ascii[ee]] || e;
+					if (Array.isArray(data[e].texts) && data[e].texts.length > 0) {
+						for(var ee = 1; ee < data[e].texts.length; ee++) {
+							MP.emotes_ascii[data[e].texts[ee]] = MP.emotes_ascii[data[e].texts[ee]] || data[e].short_name;
+						}
+					}
+
+					//Regular aliases
+					if (Array.isArray(data[e].short_names) && data[e].short_names.length > 0) {
+						for(var ee = 1; ee < data[e].short_names.length; ee++) {
+							MP.emotes["Basic"][data[e].short_names[ee]] = MP.emotes["Basic"][data[e].short_names[ee]] || { url: "https://raw.githubusercontent.com/iamcal/emoji-data/master/img-google-64/" + data[e].image, style: 'max-width: 24px; max-height: 24px;' };
+						}
+					}
 				}
+
 				//Trollface emote
 				var e = 'trollface';
 				MP.emotes['Basic'][e] = MP.emotes['Basic'][e] || { url: 'https://raw.githubusercontent.com/Ranks/emojify.js/master/dist/images/basic/' + e + '.png', };
-			 }).done(function(){
-	            //TastyCat
-			 	$.getJSON("https://emotes.tastycat.org/emotes-full.json", function(data) {
-			 		for(var e in data.emotes)
-		 				MP.emotes["TastyCat"][e.toLowerCase().replace('&', 'n')] = MP.emotes["TastyCat"][e.toLowerCase().replace('&', 'n')] || { url: data.emotes[e].url, style: 'max-width: ' + data.emotes[e].width + 'px ;max-height: ' + data.emotes[e].height + 'px;'};
-			    }).done(function(){
-				 	//Twitch.tv
-				 	$.getJSON("https://twitchemotes.com/api_cache/v2/images.json", function(data) {
-				        for(var e in data.images)
-				            MP.emotes["Twitch"][data.images[e].code.toLowerCase()] = MP.emotes["Twitch"][data.images[e].code.toLowerCase()] || { url: "https://static-cdn.jtvnw.net/emoticons/v1/" + e + "/1.0", style: 'max-width: 24px; max-height: 24px;', };
-				 	}).done(function(){
-				 		//BetterTTV
-				 		$.getJSON("https://api.betterttv.net/emotes", function(data){
-				 			for(var e in data.emotes)
-				 				if((e = data.emotes[e]).regex.indexOf(':') == -1) MP.emotes["BetterTTV"][e.regex.toLowerCase().replace('&', 'n')] = MP.emotes["BetterTTV"][e.regex.toLowerCase().replace('&', 'n')] || { url: e.url, style: 'max-width: 24px; max-height: 24px;', };
-				 		}).done(callback || (function(){}));
-				 	});
-				 });
-			 });
-		},
+			}).done(function(){
+               //TastyCat
+                $.getJSON("https://emotes.tastycat.org/emotes-full.json", function(data) {
+                    for(var e in data.emotes)
+                        MP.emotes["TastyCat"][e.toLowerCase().replace('&', 'n')] = MP.emotes["TastyCat"][e.toLowerCase().replace('&', 'n')] || { url: data.emotes[e].url, style: 'max-width: ' + data.emotes[e].width + 'px ;max-height: ' + data.emotes[e].height + 'px;'};
+                }).done(function(){
+                    //Twitch.tv
+                    $.getJSON("https://twitchemotes.com/api_cache/v2/images.json", function(data) {
+                        for(var e in data.images)
+                            MP.emotes["Twitch"][data.images[e].code.toLowerCase()] = MP.emotes["Twitch"][data.images[e].code.toLowerCase()] || { url: "https://static-cdn.jtvnw.net/emoticons/v1/" + e + "/1.0", style: 'max-width: 24px; max-height: 24px;', };
+                    }).done(function(){
+                        //BetterTTV
+                        $.getJSON("https://api.betterttv.net/emotes", function(data){
+                            for(var e in data.emotes)
+                                if((e = data.emotes[e]).regex.indexOf(':') == -1) MP.emotes["BetterTTV"][e.regex.toLowerCase().replace('&', 'n')] = MP.emotes["BetterTTV"][e.regex.toLowerCase().replace('&', 'n')] || { url: e.url, style: 'max-width: 24px; max-height: 24px;', };
+                        }).done(callback || (function(){}));
+                    });
+                 });
+             });
+        },
 		escape: function(txt){
 			return txt.replace(/</g,'&lt;').replace(/>/g,'&gt;');
 		},
