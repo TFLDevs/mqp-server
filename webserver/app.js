@@ -32,6 +32,7 @@ app.use(function(req, res, next) {
 app.use(express.static(path.resolve(__dirname, 'public')));
 app.use('/pads', express.static(path.resolve(__dirname, 'public')));
 app.get('/config', function(req, res) {
+    res.header('content-type', 'application/javascript');
     res.send(fs.readFileSync(__dirname + '/public/lib/js/webconfig.js'));
 });
 app.get('/api/room', function(req,res){
