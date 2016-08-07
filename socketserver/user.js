@@ -1,15 +1,15 @@
-var util = require('util');
-var DB = require('./database');
-var DBUtils = require('./database_util');
+'use strict'
+const util = require('util');
+let DB;
+const utils = require('./utils');
 
 // Every user obj starts with this, then gets extended by what's in the db
 var defaultObj = function(){
 	return {
 		uid: 0,
 		un: "",
-		pw: "", // MD5(SHA256(pass) + SALT)
+		pw: "", 
 		role: null,
-		banned: null,
 		activepl: null,
 		created: 0,
 		playlists: [],
@@ -24,6 +24,7 @@ var defaultObj = function(){
 		temp_uptime: Date.now(),
 		lastdj: false,
 		salt: '',
+		blocked: [],
 	};
 };
 
@@ -40,12 +41,12 @@ var fieldsNotSent = [
 	'created',
 	'lastdj',
 	'salt',
+	'blocked',
 ];
 
 // These fields (key from defaultObj) are not saved in the db
 var fieldsNotSaved = [
 	'role',
-	'banned',
 	'playlistCache',
 	'temp_uptime',
 ];
@@ -85,6 +86,7 @@ function removeFields(obj, fields){
  *
  */
 function User(){
+	DB = require('./database');
 	this.userExists = false;
 	this.data = new defaultObj;
 }
@@ -182,6 +184,35 @@ User.prototype.removePlaylist = function (pid, callback) {
 	callback('PlaylistNotFound');
 };
 
+User.prototype.addBlockedUser = function(uid, callback) {
+	var index = this.data.blocked.indexOf(uid);
+
+	if(index != -1) {
+		callback('UserAlreadyBlocked');
+
+	} else if(this.data.uid == uid) {
+		callback('CannotBlockSelf');
+
+	} else {
+		this.data.blocked.push(uid);
+		this.updateUser();
+		callback(null, true);
+	}
+};
+
+User.prototype.removeBlockedUser = function(uid, callback) {
+	var index = this.data.blocked.indexOf(uid);
+
+	if(index == -1) {
+		callback('UserNotBlocked');
+
+	} else {
+		this.data.blocked.splice(index, 1);
+		this.updateUser();
+		callback(null, true);
+	}
+}
+
 /**
  * getClientObj() Returns public information to be sent to clients
  *
@@ -241,10 +272,8 @@ Object.defineProperty( User.prototype, 'pw', {
 		return this.data.pw;
 	},
 	set: function(val) {
-		
-		this.data.pw = DBUtils.makePass(val, this.data.salt);
+		this.data.pw = utils.hash.bcrypt(val);
 		this.updateUser();
-		
 		return this;
 	}
 });
@@ -255,16 +284,6 @@ Object.defineProperty( User.prototype, 'role', {
 	},
 	set: function(val) {
 		this.data.role = val;
-		// We do NOT want to save this value
-	}
-});
-
-Object.defineProperty( User.prototype, 'banned', {
-	get: function() {
-		return this.data.banned;
-	},
-	set: function(val) {
-		this.data.banned = val;
 		// We do NOT want to save this value
 	}
 });
@@ -369,6 +388,16 @@ Object.defineProperty( User.prototype, 'salt', {
 	},
 	set: function(val) {
 		this.data.salt = val;
+		this.updateUser();
+	}
+});
+
+Object.defineProperty( User.prototype, 'blocked', {
+	get: function() {
+		return this.data.blocked;
+	},
+	set: function(val) {
+		this.data.blocked = val;
 		this.updateUser();
 	}
 });

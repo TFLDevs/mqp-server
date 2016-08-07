@@ -1,24 +1,24 @@
+'use strict';
 //Modules
-var ws = require('ws');
-var http = require('http');
-var https = require('https');
-var Duration = require('durationjs');
-var request = require('request');
-var util = require('util');
-var extend = require('extend');
-var updateNotifier = require('update-notifier');
+const ws = require('ws');
+const http = require('http');
+const https = require('https');
+const Duration = require('durationjs');
+const request = require('request');
+const extend = require('extend');
+const updateNotifier = require('update-notifier');
+const fs = require('fs-extra');
+const nconf = require('nconf');
+const crypto = require('crypto');
 
 //Files
-var config = require('../serverconfig');
-var DB = require("./database");
-var Room = require('./room');
-var User = require('./user');
-var Mailer = require('./mailer');
-var YT = require('./YT');
-var Roles = require('./role');
-var Hash = require('./hash');
-var log = new (require('basic-logger'))({showTimestamp: true, prefix: "SocketServer"});
-var WebSocketServer = ws.Server;
+const DB = require("./database");
+const Room = require('./room');
+const Mailer = require('./mail/mailer');
+const YT = require('./YT');
+const Roles = require('./role');
+const log = new (require('basic-logger'))({showTimestamp: true, prefix: "SocketServer"});
+const WebSocketServer = ws.Server;
 
 
 ws.prototype.sendJSON = function(obj){
@@ -194,23 +194,27 @@ var SocketServer = function(server){
 	if (server){
 		settings.server = server;
 	}else{
-		var port = config.socketServer.port || undefined;
-		var ip = config.socketServer.host || undefined;
+		var port = nconf.get('socketServer:port') || undefined;
+		var ip = nconf.get('socketServer:host') || undefined;
 
-		if (config.certificate && config.certificate.key && config.certificate.cert){
-			settings.server = https.createServer(config.certificate).listen(port,ip);
-		}else{
+		if (nconf.get('useSSL') && nconf.get('certificate') && nconf.get('certificate:key') && nconf.get('certificate:cert')) {
+			let certificates = {
+				key: fs.readFileSync(nconf.get('certificate:key')),
+				cert: fs.readFileSync(nconf.get('certificate:cert')),
+			}
+			settings.server = https.createServer(certificates).listen(port, ip);
+		} else {
 			settings.server = http.createServer().listen(port,ip);
 		}
 	}
 
 	this.wss = new WebSocketServer(settings);
-	log.info('Socket server listening on port ' + (config.socketServer.port || config.webServer.port));
+	log.info('Socket server listening on port ' + (nconf.get('socketServer:port') || nconf.get('webServer:port')));
 
 //	this.wss = new WebSocketServer({ port: config.socketServer.port });
 //	log.info('Socket server listening on port ' + config.socketServer.port);
 
-	this.room = new Room(this, config.room);
+	this.room = new Room(this, nconf.get('room'));
 
 	// Keepalive packets.  This.... is messy.
 	setInterval( function(){
@@ -350,25 +354,27 @@ var SocketServer = function(server){
 				}));
 				return;
 			}
-
-			// Return if unauthenticated socket or banned or restricted user tries to do anything other than signup, login, or join room.
-			var restricted = false;
-			if((!socket.user || (socket.room && that.room.isUserBanned(socket.user.uid)) || (restricted = (Date.now() - socket.user.created) <= config.room.signupcd) || socket.user.confirmation) && 
-				['signup', 'login', 'joinRoom', 'getUsers', 'getHistory', 'getStaff', 'getBannedUsers', 'confirmation', 'recovery'].indexOf(data.type) == -1){
-
-				returnObj.data = {error: 'NotLoggedIn'};
-				if (socket.user) {
-					if(socket.user.confirmation){
-						returnObj.data = {error: 'EmailNotConfirmed'};
-					} else {
-						returnObj.data = {error: 'UserBanned'};
-					}
-				} else if (restricted) {
-					returnObj.data = {error: 'UserRestricted'};
+			
+			//Return if the user is not permitted to do anything besides what is listed below
+			if(['signup', 'login', 'joinRoom', 'getUsers', 'getHistory', 'getStaff', 'getBannedUsers', 'confirmation', 'recovery'].indexOf(data.type) == -1){
+				
+				if(!socket.user){
+					returnObj.data = { error: 'NotLoggedIn' };
+					
+				} else if(socket.room && that.room.isUserRestricted(socket.user.uid, 'BAN')){
+					returnObj.data = { error: 'UserBanned' };
+					
+				} else if((Date.now() - socket.user.created) <= nconf.get('room:signupcd')){
+					returnObj.data = { error: 'UserOnCooldown' };
+					
+				} else if(socket.user.confirmation){
+					returnObj.data = { error: 'EmailNotConfirmed' };
+					
 				}
-
-				socket.sendJSON(returnObj);
-				return;
+				if(returnObj.data){
+					socket.sendJSON(returnObj);
+					return;
+				}
 			}
 
 			switch(data.type){
@@ -398,7 +404,7 @@ var SocketServer = function(server){
 					}
 					*/
 					//Check if recovery is enabled
-					if (!(config.room.allowrecovery)){
+					if (!(nconf.get('room:allowrecovery'))){
 						returnObj.data = {
 							error: 'RecoveryDisabled'
 						};
@@ -415,15 +421,17 @@ var SocketServer = function(server){
 						break;
 					}
 
+					console.log("Sending recovery email");
 					var sendRecovery = function(user){
 						//Generate new code and send email
-						user.recovery = Hash.md5(Date.now() + '', user.un);
+						user.recovery = utils.db.randomBytes(36, 'base64');
 						Mailer.sendEmail('recovery', {
 							user: user.un,
 							code: user.recovery.code,
 							email: data.data.email,
 							timeout: (new Date().addDays(1)).toISOString().replace(/T/, ' ').replace(/\..+/, '') + ' UTC',
 						}, data.data.email, function(err, data){
+							console.log("Recovery email send!");
 							if(err){
 								returnObj.data = {
 									error: 'EmailAuthIssue',
@@ -604,7 +612,6 @@ var SocketServer = function(server){
 					}
 
 					that.room.getBannedUsers(function(err, bans){
-						console.log(err);
 						returnObj.data = bans || [];
 						socket.sendJSON(returnObj);
 					});
@@ -662,16 +669,16 @@ var SocketServer = function(server){
 							votes: that.room.queue.makeVoteObj(),
 							vote: that.room.queue.getUserVote( socket ),
 						},
-						historylimit: config.room.history.limit_send,
+						historylimit: nconf.get('room:history:limit_send'),
 						roles: Roles.makeClientObj(),
 						roleOrder: Roles.getOrder(),
 						staffRoles: Roles.getStaffRoles(),
-						lastChat: that.room.makePrevChatObj(),
+						lastChat: ((!socket.user && !nconf.get('room:guestCanSeeChat')) || (that.room.isUserRestricted((socket.user || {}).uid, 'BAN') && !nconf.get('room:bannedCanSeeChat'))) ? [] : that.room.makePrevChatObj(),
 						time: new Date().getTime(),
-						captchakey: config.apis.reCaptcha.key,
-						allowemojis: config.room.allowemojis,
-						description: config.room.description,
-						recaptcha: config.room.recaptcha,
+						captchakey: nconf.get('apis:reCaptcha:key'),
+						allowemojis: nconf.get('room:allowemojis'),
+						description: nconf.get('room:description'),
+						recaptcha: nconf.get('room:recaptcha'),
 					};
 
 					socket.sendJSON(returnObj);
@@ -1362,11 +1369,12 @@ var SocketServer = function(server){
 						if (socket.user.activepl){
 							socket.user.playlistCache[ socket.user.activepl ].getExpanded(function(err, plData){
 								tempUser.playlists[ socket.user.activepl ].content = YT.removeThumbs(plData);
-								returnObj.data.user = tempUser,
+								tempUser.playlists[ socket.user.activepl ].num = plData.length;
+								returnObj.data.user = tempUser;
 								socket.sendJSON(returnObj);
 							});
 						}else{
-							returnObj.data.user = tempUser,
+							returnObj.data.user = tempUser;
 							socket.sendJSON(returnObj);
 						}
 
@@ -1377,12 +1385,12 @@ var SocketServer = function(server){
 					if(data.type == 'login'){
 							DB.loginUser(data.data, callback);
 					} else {
-						if(config.room.recaptcha){
+						if (nconf.get('room:recaptcha')) {
 							request.post(
 								'https://www.google.com/recaptcha/api/siteverify',
 								{
 									form: {
-										secret: config.apis.reCaptcha.secret,
+										secret: nconf.get('apis:reCaptcha:secret'),
 										response: data.data.captcha,
 										remoteip: socket.upgradeReq.connection.remoteAddress,
 									}
@@ -1443,11 +1451,16 @@ var SocketServer = function(server){
 					}
 
 					that.room.sendMessage(socket, data.data.message, null, null, function(cid){
-						returnObj.data = {
-							success: true,
-							cid: cid,
-						};
-
+						
+						if(cid)
+							returnObj.data = {
+								success: true
+							};
+						else
+							returnObj.data = {
+								error: 'UserMuted'
+							};
+					
 						socket.sendJSON(returnObj);
 					});
 					break;
@@ -1934,7 +1947,7 @@ var SocketServer = function(server){
 							};
 							socket.sendJSON(returnObj);
 						});
-					} else if (data.type == 'playlistAddSong'){
+					} else if(data.type == 'playlistAddSong') {
 						if (!data.data.cid){
 							returnObj.data = {
 								error: 'PropsMissing'
@@ -1942,10 +1955,16 @@ var SocketServer = function(server){
 							socket.sendJSON(returnObj);
 							break;
 						}
-						if (!data.data.pos){
+
+						//Set correct playlist position
+						if (data.data.pos != 'top' && data.data.pos != 'bottom'){
 							data.data.pos = 'top';
 						}
+
+						//If an array of CIDs was supplied
 						if (Array.isArray(data.data.cid)) {
+
+							//Check if any CIDs were supplied
 							if (data.data.cid.length == 0) {
 								returnObj.data = {
 									error: 'emptyCidArray'
@@ -1954,48 +1973,34 @@ var SocketServer = function(server){
 
 								break;
 							}
-							var songsAdded = 0;
-							var videos = [];
-
+							//Remove all duplicate CIds
 							data.data.cid.filter(function(e, i, a){
-								return a.indexOf(e) != i;
+								return a.indexOf(e) != i && pl.content.indexOf(e) == -1;
 							});
 
+							//Add data to the playlist
 							for (var i = 0, len = data.data.cid.length; i < len; i++) {
 								var cid = data.data.cid[i];
 
-								if (pl.data.content.indexOf(cid) == -1) {
-									pl.addSong(cid, data.data.pos, function(err, vidData, pos){
-										if (!err){
-											for (var i in vidData) {
-												videos.push(vidData[i]);
-											}
-										} else {
-											console.log(err);
-										}
-
-										if (++songsAdded == data.data.cid.length) {
-											returnObj.data = {
-												video: videos,
-												pos: data.data.pos,
-												plid: pl.id
-											};
-
-											socket.sendJSON(returnObj);
-										}
-									});
-								} else {
-									if (++songsAdded == data.data.cid.length) {
-										returnObj.data = {
-											video: videos,
-											pos: data.data.pos,
-											plid: pl.id
-										};
-
-										socket.sendJSON(returnObj);
-									}
-								}
+								if(data.data.pos == 'top')
+									pl.data.content.unshift(cid);
+								else
+									pl.data.content.push(cid);
 							}
+
+							//Save playlist
+							pl.save();
+
+							//Fetch all song data and return them to client
+							YT.getVideo(data.data.cid, function(err, videos) {
+								returnObj.data = {
+									video: _.values(videos),
+									pos: data.data.pos,
+									plid: pl.id
+								};
+
+								socket.sendJSON(returnObj);
+							});
 						} else {
 							if (pl.data.content.indexOf(data.data.cid) > -1){
 								returnObj.data = {
@@ -2677,18 +2682,30 @@ var SocketServer = function(server){
 
 					that.room.deleteChat(cid, socket.user.uid);
 					break;
-
-				case 'banUser':
+					
+				case 'restrictUser':
 					/*
 					 Expects {
-					 	type: 'banUser',
+					 	type: 'restrictUser',
 					 	data: {
 					 		uid: uid,
 					 		duration: ISO 8601 duration,
-					 		reason: ''
+					 		reason: '',
+					 		type: '',
 					 	}
 					 }
 					*/
+					
+					//Check for required parameters
+					if (!data.data.type || isNaN(data.data.uid)){
+						returnObj.data = {
+							error: 'PropsMissing'
+						};
+						socket.sendJSON(returnObj);
+						break;
+					}
+					
+					//Check if source user is logged in
 					if (!socket.room) {
 						returnObj.data = {
 							error: 'NotInPad'
@@ -2696,13 +2713,17 @@ var SocketServer = function(server){
 						socket.sendJSON(returnObj);
 						break;
 					}
-					if (!Roles.checkPermission(socket.user.role, 'room.banUser')){
+					
+					//Check source permissions
+					if (!Roles.checkPermission(socket.user.role, 'room.restrict.' + data.data.type.toLowerCase())){
 						returnObj.data = {
 							error: 'InsufficientPermissions'
 						};
 						socket.sendJSON(returnObj);
 						break;
 					}
+
+					//Check UID validity
 					var uid = parseInt(data.data.uid);
 					if (isNaN(uid)){
 						returnObj.data = {
@@ -2711,54 +2732,98 @@ var SocketServer = function(server){
 						socket.sendJSON(returnObj);
 						break;
 					}
-
-					var banObj = {
+					
+					var restrictObj = {
 						uid: uid,
 						end: null,
 						start: Date.now(),
 						reason: data.data.reason || 'No reason specified',
-						bannedBy: {
+						type: data.data.type,
+						source: {
 							uid: socket.user.uid,
 							role: socket.user.role
 						}
 					};
 
 					try{
-						banObj.end = (Date.now() + (new Duration(data.data.duration.toString().toUpperCase())).inSeconds() * 1000);
+						restrictObj.end = (Date.now() + (new Duration(data.data.duration.toString().toUpperCase())).inSeconds() * 1000);
 					} catch(e) {
 						returnObj.data = {
-							error: 'InvalidBanType',
+							error: 'InvalidRestrictionEnd',
 							text: e.message,
 						};
 						socket.sendJSON(returnObj);
 						break;
 					}
-
-					that.room.banUser(banObj, function(err){
+					
+					that.room.restrictUser(restrictObj, function(err){
 						if (err) {
 							returnObj.data = {
 								error: err
 							};
-							socket.sendJSON(returnObj);
-						}
-						else {
-							// Success
+							
+						} else {
 							returnObj.data = {
-								success: true
+								success: true,
+								end: restrictObj.end,
 							};
-							socket.sendJSON(returnObj);
 						}
+						socket.sendJSON(returnObj);
 					});
 					break;
-				case 'unbanUser':
+				case 'getUserRestrictions':
 					/*
 					 Expects {
-					 	type: 'unbanUser',
+					 	type: 'getUserRestrictions',
 					 	data: {
-					 		uid: uid
+					 		uid: uid,
 					 	}
 					 }
 					*/
+					
+					//Check for required parameters
+					if (isNaN(data.data.uid)){
+						returnObj.data = {
+							error: 'PropsMissing'
+						};
+						socket.sendJSON(returnObj);
+						break;
+					}
+					
+					var arr = Roles.getRole(socket.user.role).permissions
+						.filter(function(e){
+							return e.indexOf("room.restrict") != -1;
+						})
+						.map(function(e){
+							return e.slice(14).toUpperCase();
+						});
+					
+					returnObj.data = {
+						restrictions: that.room.getRestrictions(arr, data.data.uid)
+					}
+					socket.sendJSON(returnObj);
+					break;
+				case 'unrestrictUser':
+					/*
+					 Expects {
+					 	type: 'unrestrictUser',
+					 	data: {
+					 		uid: uid,
+					 		type: ''
+					 	}
+					 }
+					*/
+					
+					//Check for required parameters
+					if (!data.data.type || isNaN(data.data.uid)){
+						returnObj.data = {
+							error: 'PropsMissing'
+						};
+						socket.sendJSON(returnObj);
+						break;
+					}
+					
+					//Check if source user is logged in
 					if (!socket.room) {
 						returnObj.data = {
 							error: 'NotInPad'
@@ -2766,13 +2831,17 @@ var SocketServer = function(server){
 						socket.sendJSON(returnObj);
 						break;
 					}
-					if (!Roles.checkPermission(socket.user.role, 'room.banUser')){
+					
+					//Check source permissions
+					if (!Roles.checkPermission(socket.user.role, 'room.restrict.' + data.data.type.toLowerCase())){
 						returnObj.data = {
 							error: 'InsufficientPermissions'
 						};
 						socket.sendJSON(returnObj);
 						break;
 					}
+					
+					//Check UID validity
 					var uid = parseInt(data.data.uid);
 					if (isNaN(uid)){
 						returnObj.data = {
@@ -2783,7 +2852,7 @@ var SocketServer = function(server){
 					}
 
 					returnObj.data = {
-						success: that.room.unbanUser(uid, socket)
+						success: that.room.unrestrictUser(uid, data.data.type, socket)
 					};
 					socket.sendJSON(returnObj);
 
@@ -3007,6 +3076,74 @@ var SocketServer = function(server){
 						DB.getUserByName(data.data.un, { getPlaylists: false }, cb);
 					else
 						DB.getUserByUid(~~(data.data.uid), { getPlaylists: false }, cb);
+					break;
+				case 'blockUser':
+					/*
+					 Expects {
+						 type: 'blockUser',
+						 data: {
+							 uid: uid,
+						 }
+					 }
+				 	*/
+
+					//Check for props
+					if (!(data.data.uid = +data.data.uid) || uid < 0){
+						returnObj.data = {
+							error: 'WrongProps'
+						};
+						socket.sendJSON(returnObj);
+						break;
+					}
+
+					//Add blocked user
+					socket.user.addBlockedUser(data.data.uid, function(err) {
+						if(err) {
+							returnObj.data = {
+								error: err
+							}
+						} else {
+							returnObj.data = {
+								success: true
+							}
+						}
+
+						socket.sendJSON(returnObj);
+					});
+					break;
+				case 'unblockUser':
+					/*
+					 Expects {
+						 type: 'unblockUser',
+						 data: {
+							 uid: uid,
+						 }
+					 }
+				 	*/
+
+					//Check for props
+					if (!(data.data.uid = +data.data.uid)){
+						returnObj.data = {
+							error: 'WrongProps'
+						};
+						socket.sendJSON(returnObj);
+						break;
+					}
+
+					//Remove blocked user
+					socket.user.removeBlockedUser(data.data.uid, function(err) {
+						if(err) {
+							returnObj.data = {
+								error: err
+							}
+						} else {
+							returnObj.data = {
+								success: true
+							}
+						}
+
+						socket.sendJSON(returnObj);
+					});
 					break;
 			}
 		});

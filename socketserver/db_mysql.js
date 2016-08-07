@@ -1,30 +1,31 @@
+'use strict';
 //Modules
-var mysql = require('mysql');
-var util = require('util');
-var _ = require('underscore');
-var log = new(require('basic-logger'))({
+const mysql = require('mysql');
+const util = require('util');
+const log = new(require('basic-logger'))({
     showTimestamp: true,
     prefix: "MysqlDB"
 });
+const nconf = require('nconf');
 
 //Files
-var config = require('../serverconfig.js');
-var Hash = require('./hash');
-var Mailer = require('./mailer');
-var DBUtils = require('./database_util');
-var Roles = require('./role.js');
+const Mailer = require('./mail/mailer');
+const DBUtils = require('./utils').db;
+const Roles = require('./role.js');
+const User = require('./user');
+const _ = require('lodash');
 
-var db = null;
-var pool = null;
+let db = null;
+let pool = null;
 
-var MysqlDB = function(){
-	var that = this;
+const MysqlDB = function(){
+	const that = this;
 
-	var mysqlConfig = {
-		host: config.db.mysqlHost,
-		user: config.db.mysqlUser,
-		password: config.db.mysqlPassword,
-		database: config.db.mysqlDatabase,
+	const mysqlConfig = {
+		host: nconf.get('db:mysqlHost'),
+		user: nconf.get('db:mysqlUser'),
+		password: nconf.get('db:mysqlPassword'),
+		database: nconf.get('db:mysqlDatabase'),
 		charset: "UTF8_GENERAL_CI",
 		multipleStatements: true,
 		connectionLimit: 1,
@@ -43,7 +44,7 @@ var MysqlDB = function(){
 					    `id` INTEGER UNSIGNED NOT NULL AUTO_INCREMENT,\
 					    `email` VARCHAR(254) UNIQUE NOT NULL DEFAULT 'NULL',\
 					    `un` VARCHAR(20) UNIQUE NOT NULL DEFAULT 'NULL',\
-					    `pw` VARCHAR(32) NOT NULL DEFAULT 'NULL',\
+					    `pw` VARCHAR(60) NOT NULL DEFAULT 'NULL',\
 					    `salt` VARCHAR(10),\
 					    `activepl` INTEGER UNSIGNED NULL DEFAULT NULL,\
 				        `created` DATETIME NULL,\
@@ -56,6 +57,7 @@ var MysqlDB = function(){
 					    `lastdj` TINYINT(1) NOT NULL DEFAULT 0,\
 					    PRIMARY KEY (`id`)\
 					);\
+          ALTER TABLE `users` MODIFY `pw` VARCHAR(60);\
 					\
 					CREATE TABLE IF NOT EXISTS `playlists` (\
 					    `id` INTEGER UNSIGNED NOT NULL AUTO_INCREMENT,\
@@ -121,7 +123,7 @@ var MysqlDB = function(){
                         `role` VARCHAR(32) NOT NULL\
                     );\
                     \
-                    CREATE TABLE IF NOT EXISTS `bans` (\
+                    CREATE TABLE IF NOT EXISTS `restrictions` (\
                         `slug` VARCHAR(32),\
                         `id` INTEGER UNSIGNED NOT NULL AUTO_INCREMENT,\
                         `uid` INT(11) NOT NULL,\
@@ -129,6 +131,7 @@ var MysqlDB = function(){
                         `reason` VARCHAR(256) NULL,\
                         `start` DATETIME,\
                         `end` DATETIME,\
+                        `type` VARCHAR(16),\
                         PRIMARY KEY (`id`)\
                     );\
                     \
@@ -138,6 +141,12 @@ var MysqlDB = function(){
                         `time` DATETIME\
                     );\
                     \
+          CREATE TABLE IF NOT EXISTS `user_blocks` (\
+            `from` INTEGER UNSIGNED NOT NULL,\
+            `to` INTEGER UNSIGNED NOT NULL,\
+            PRIMARY KEY(`from`, `to`)\
+            );\
+          \
 					UPDATE `users` SET `lastdj` = false;\
 				", null, function(err, res){
 					if(err) throw new Error(err);
@@ -262,8 +271,8 @@ MysqlDB.prototype.getRoom = function(slug, callback) {
 
     var out = {
         roles: {},
+        restrictions: {},
         globalRoles: {},
-        bans: {},
         history: [],
     }
 
@@ -299,18 +308,19 @@ MysqlDB.prototype.getRoom = function(slug, callback) {
             staffOverrides[res[ind].uid] = res[ind].role;
           }
         }
-
-        that.execute("SELECT `uid`, `uid_by`, `reason`, UNIX_TIMESTAMP(`start`), UNIX_TIMESTAMP(`end`), (SELECT `role` FROM `roles` WHERE `roles`.`uid` = `bans`.`uid_by` AND ?) as `role` FROM `bans` WHERE ?;", [ { slug: slug, }, { slug: slug, } ], function(err, res) {
+       
+        that.execute("SELECT `uid`, `uid_by`, `reason`, UNIX_TIMESTAMP(`start`) as `start`, UNIX_TIMESTAMP(`end`) as `end`, (SELECT `role` FROM `roles` WHERE `roles`.`uid` = `restrictions`.`uid_by` AND ?) as `role`, `type` FROM `restrictions` WHERE ?;", [ { slug: slug, }, { slug: slug, } ], function(err, res) {
             if(err) { callback(err); return; }
 
             for(var ind in res){
                 var obj = res[ind];
-                out.bans[obj.uid] = {
+                out.restrictions[obj.uid] = out.restrictions[obj.uid] || {};
+                out.restrictions[obj.uid][obj.type] = {
                     uid: obj.uid,
                     start: obj.start * 1000,
                     end: obj.end * 1000,
                     reason: obj.reason,
-                    bannedBy: {
+                    source: {
                         uid: obj.uid_by,
                         role: obj.role,
                     }
@@ -371,8 +381,8 @@ MysqlDB.prototype.setRoom = function(slug, val, callback) {
 
     callback = callback || function(){};
 
-    var outRoles = [], outBans = [], outHistory = [];
-
+    var outRoles = [], outRestrictions = [], outHistory = [];
+    
     for(var key in val.roles){
         var globalUser = val.globalRoles[key] || [];
         for(var ind in val.roles[key]) {
@@ -381,25 +391,28 @@ MysqlDB.prototype.setRoom = function(slug, val, callback) {
           }
         }
     }
-    for(var key in val.bans){
-        var obj = val.bans[key];
-        outBans.push([ slug, key, obj.bannedBy.uid, obj.reason, new Date(obj.start), new Date(obj.end) ]);
+    for(var key in val.restrictions){
+        var obj = val.restrictions[key];
+        for(var type in obj){
+            var restobj = obj[type];
+            outRestrictions.push([ slug, key, restobj.source.uid, restobj.reason, new Date(restobj.start), new Date(restobj.end), type ]);
+        }
     }
     for(var ind in val.history){
         var obj = val.history[ind];
         outHistory.push([ slug, obj.user.uid, obj.song.cid, new Date(obj.start), obj.song.duration, obj.song.title, obj.votes.like, obj.votes.grab, obj.votes.dislike ]);
     }
-
-    var query = "DELETE FROM `roles` WHERE ?; DELETE FROM `bans` WHERE ?;DELETE FROM `history_dj` WHERE ?;";
+    
+    var query = "DELETE FROM `roles` WHERE ?; DELETE FROM `restrictions` WHERE ?;DELETE FROM `history_dj` WHERE ?;";
     var params = [{ slug: slug, }, { slug: slug, }, { slug: slug, }];
 
     if(outRoles.length){
         query += "INSERT INTO `roles`(??) VALUES ?;";
         params.push([ 'slug', 'uid', 'role' ], outRoles);
     }
-    if(outBans.length){
-        query += "INSERT INTO `bans`(??) VALUES ?;";
-        params.push([ 'slug', 'uid', 'uid_by', 'reason', 'start', 'end' ], outBans);
+    if(outRestrictions.length){
+        query += "INSERT INTO `restrictions`(??) VALUES ?;";
+        params.push([ 'slug', 'uid', 'uid_by', 'reason', 'start', 'end', 'type' ], outRestrictions);
     }
     if(outHistory.length){
         query += "INSERT INTO `history_dj`(??) VALUES ?;";
@@ -418,36 +431,9 @@ MysqlDB.prototype.setRoom = function(slug, val, callback) {
     return that;
 };
 
-//TokenDB
-MysqlDB.prototype.deleteToken = function(tok) {
-    this.execute("DELETE FROM `tokens` WHERE ?;", { token: tok, });
-};
-
-MysqlDB.prototype.createToken = function(email) {
-    var tok = DBUtils.makePass(email, Date.now());
-
-    this.execute("DELETE FROM `tokens` WHERE ?; INSERT INTO `tokens` SET ?;", [ { email: email, }, { token: tok, email: email, created: new Date() } ]);
-
-    return tok;
-};
-
-MysqlDB.prototype.isTokenValid = function(tok, callback) {
-    this.execute("SELECT `token`, `email` FROM `tokens` WHERE ? AND DATEDIFF(NOW(), `created`) < ?;", [{ token: tok, }, config.loginExpire || 365], function(err, res) {
-        if (err || res.length == 0) {
-            callback('InvalidToken');
-            return;
-        }
-
-        callback(null, res[0].email);
-    });
-};
-
 //UserDB
 MysqlDB.prototype.getUserNoLogin = function(uid, callback){
     var that = this;
-
-	var User = require('./user');
-
 	this.execute("SELECT `salt`, `lastdj`, `uptime`, `recovery`, UNIX_TIMESTAMP(`recovery_timeout`) as `recovery_timeout`, `confirmation`, `badge_top`, `badge_bottom`, `created`, `activepl`, `pw`, `un`, `id` FROM `users` WHERE ?", { id: uid, }, function(err, res){
         if (err || res.length == 0) { callback('UserNotFound'); return; }
 
@@ -471,12 +457,16 @@ MysqlDB.prototype.getUserNoLogin = function(uid, callback){
             un: res.un,
             uid: res.id,
             salt: res.salt,
+            blocked: [],
         }
 
-        that.execute("SELECT `id` FROM `playlists` WHERE `owner` = ?;", [ uid ], function(err, res) {
+        that.execute("SELECT `id` FROM `playlists` WHERE ?; SELECT `to` FROM `user_blocks` WHERE ?", [ { owner: uid, }, { from: uid,} ], function(err, res) {
 
-            for(var ind in res)
-                data.playlists.push(res[ind].id);
+            for(var ind in res[0])
+                data.playlists.push(res[0][ind].id);
+
+            for(var ind in res[1])
+                data.blocked.push(res[1][ind].to);
 
             callback(null, data);
         });
@@ -491,7 +481,6 @@ MysqlDB.prototype.usernameExists = function(name, callback){
 };
 
 MysqlDB.prototype.createUser = function(obj, callback) {
-    var User = require('./user');
     var that = this;
 
     var defaultCreateObj = {
@@ -532,13 +521,10 @@ MysqlDB.prototype.createUser = function(obj, callback) {
                 var user = new User();
 
                 user.data.un = inData.un;
-                user.data.salt = DBUtils.makePass(Date.now()).slice(0, 10);
-                user.data.pw = DBUtils.makePass(inData.pw, user.data.salt);
+                user.data.pw = inData.pw;
                 user.data.created = Date.now();
-                if (config.room.email.confirmation) user.data.confirmation = DBUtils.makePass(Date.now());
+                if (nconf.get('room:mail:confirmation')) user.data.confirmation = DBUtils.randomBytes(18, 'base64');
                 var updatedUserObj = user.makeDbObj();
-
-                var tok = that.createToken(inData.email);
 
                 delete updatedUserObj.uid;
 
@@ -549,7 +535,7 @@ MysqlDB.prototype.createUser = function(obj, callback) {
                     }
 
                     //Send confirmation email
-                    if (config.room.email.confirmation) {
+                    if (nconf.get('room:mail:confirmation')) {
                         Mailer.sendEmail('signup', {
                             code: user.data.confirmation,
                             user: inData.un,
@@ -561,78 +547,41 @@ MysqlDB.prototype.createUser = function(obj, callback) {
                     //Login user
                     user.data.uid = id;
                     user.login(inData.email);
-                    callback(null, user, tok);
+                    callback(null, user, inData.email);
                 });
             });
         }
     });
 };
 
-MysqlDB.prototype.loginUser = function(obj, callback) {
-    var User = require('./user');
-    var that = this;
-
-    var defaultLoginObj = {
-        email: null,
-        pw: null,
-        token: null,
-    };
-    util._extend(defaultLoginObj, obj);
-    var inData = defaultLoginObj;
-
-    if (inData.email && inData.pw) {
-        inData.email = inData.email.toLowerCase();
-        that.execute("SELECT `id` FROM `users` WHERE ?;", { email: inData.email, }, function(err, res) {
-            if(err || res.length == 0) callback("UserNotFound");
-            else {
-                that.getUserNoLogin(res[0].id, function(err, data) {
-                    if (DBUtils.makePass(inData.pw, data.salt) != data.pw) {
-                        callback('IncorrectPassword');
-                        return;
-                    }
-
-                    var tok = that.createToken(inData.email);
-
-                    var user = new User();
-
-                    user.login(inData.email, data, function() {
-
-                        callback(null, user, tok);
-                    });
-                });
-            }
-        });
-    } else if (inData.token) {
-        that.isTokenValid(inData.token, function(err, email) {
-            if (err) {
-                callback(err);
-                return;
-            }
-
-            that.execute("SELECT `id` FROM `users` WHERE ?;", { email: email, }, function(err, res) {
-                if(err || res.length == 0) callback("UserNotFound");
-                else {
-                    that.getUserNoLogin(res[0].id, function(err, data) {
-                        var user = new User();
-
-                        user.login(email, data, function() {
-
-                            callback(null, user);
-                        });
-                    });
-                }
-            });
-        });
-    } else {
-        callback('InvalidArgs');
-    }
+MysqlDB.prototype.loginUser = function (email, callback) {
+	const that = this;
+	if (email) {
+		email = email.toLowerCase();
+		that.execute('SELECT `id` FROM `users` WHERE ?;', { email }, (err, res) => {
+			if (err || res.length === 0) {
+				callback('UserNotFound');
+			}	else {
+				that.getUserNoLogin(res[0].id, (err, data) => {
+					const user = new User();
+					user.login(email, data, () => {
+						callback(null, user, email);
+					});
+				});
+			}
+		});
+	}
 };
 
 MysqlDB.prototype.putUser = function(email, data, callback) {
+    var that = this;
+
     callback = callback || function(){};
 
     var newData = {};
     util._extend(newData, data);
+
+    var blocked = newData.blocked.map(function(x) { return [data.uid, x]; });
 
     newData.badge_bottom = newData.badge.bottom;
     newData.badge_top = newData.badge.top;
@@ -644,17 +593,22 @@ MysqlDB.prototype.putUser = function(email, data, callback) {
     delete newData.uid;
     delete newData.badge;
     delete newData.playlists;
-    this.execute("INSERT INTO `users`(??) VALUES(?) ON DUPLICATE KEY UPDATE ?;", [ Object.keys(newData), _.values(newData), newData ], function(err, res) {
-        if(err) callback(err);
-        else callback(null, res.insertId);
+    delete newData.blocked;
+
+    this.execute("INSERT INTO `users`(??) VALUES(?) ON DUPLICATE KEY UPDATE ?; DELETE FROM `user_blocks` WHERE ?;", [ Object.keys(newData), _.values(newData), newData, { from: data.uid } ], function(err, res) {
+        if(err)
+            callback(err);
+        else
+            callback(null, res.insertId);
+
+        if(blocked.length) {
+            that.execute("INSERT INTO `user_blocks`(??) VALUES ?;", [ [ 'from', 'to' ], blocked ]);
+        }
     });
 };
 
 MysqlDB.prototype.getUser = function(email, callback){
     var that = this;
-
-    var User = require('./user');
-
     this.execute("SELECT `id` FROM `users` WHERE ?;", { email: email, }, function(err, res) {
         if(err || res.length == 0){
             callback('UserNotFound');
@@ -695,9 +649,6 @@ MysqlDB.prototype.getUserByUid = function(uid, opts, callback) {
             return;
         }
     }
-
-    var User = require('./user');
-
     if(Array.isArray(uid)){
         var out = {};
         var initialized = 0;
@@ -737,9 +688,6 @@ MysqlDB.prototype.getUserByUid = function(uid, opts, callback) {
 
 MysqlDB.prototype.getUserByName = function(name, opts, callback) {
     var that = this;
-
-    var User = require('./user');
-
     if (typeof opts === 'function') {
         callback = opts;
         opts = {};
@@ -862,4 +810,4 @@ MysqlDB.prototype.getIpHistory = function(uid, callback) {
      });
 };
 
-module.exports = new MysqlDB;
+module.exports = MysqlDB;
